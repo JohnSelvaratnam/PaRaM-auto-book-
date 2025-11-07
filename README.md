@@ -2,6 +2,8 @@
 Autobook PaRaM
 
 for copilot:
+
+
 Export all my past meeting for the current week and upcoming meeting for this week in a .csv file with the following columns:
 day | start_time | end_time | title | description | task | team
 
