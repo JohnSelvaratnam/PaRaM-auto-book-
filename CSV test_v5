@@ -1,0 +1,327 @@
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
+from datetime import datetime
+import time
+from tqdm import tqdm
+from dotenv import load_dotenv
+import os
+import csv
+
+class CalendarAutomation:
+    def __init__(self, driver):
+        self.driver = driver
+        self.wait = WebDriverWait(driver, 10)
+
+    def read_events_from_csv(self, csv_file_path):
+        events = []
+        with open(csv_file_path, 'r', encoding='utf-8') as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                events.append({
+                    'day': row.get('day', ''),
+                    'date': row.get('date', ''),
+                    'start_time': row['start_time'],
+                    'end_time': row['end_time'],
+                    'title': row['title'],
+                    'description': row.get('description', ''),
+                    'task': row.get('task', 'Default Task'),
+                    'team': row.get('team', 'CAB')
+                })
+        return events
+
+    def get_day_index_from_name(self, day_name):
+        days = {
+            'sunday': 0, 'sun': 0,
+            'monday': 1, 'mon': 1,
+            'tuesday': 2, 'tue': 2,
+            'wednesday': 3, 'wed': 3,
+            'thursday': 4, 'thu': 4,
+            'friday': 5, 'fri': 5,
+            'saturday': 6, 'sat': 6
+        }
+        return days.get(day_name.lower())
+
+    def get_day_headers(self):
+        headers = self.driver.find_elements(By.CSS_SELECTOR, ".rbc-header")
+        return [header.text for header in headers]
+
+    def get_day_index_from_date(self, date_str):
+        try:
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+        except ValueError:
+            try:
+                date_obj = datetime.strptime(date_str, '%m/%d/%Y')
+            except ValueError:
+                raise ValueError(f"Invalid date format: {date_str}")
+
+        headers = self.get_day_headers()
+        for idx, header in enumerate(headers):
+            day_num = header.split()[0]
+            if date_obj.day == int(day_num):
+                return idx
+        return None
+
+    def time_to_hour_minute(self, time_str):
+        time_str = time_str.strip().upper()
+        if 'AM' in time_str or 'PM' in time_str:
+            time_obj = datetime.strptime(time_str, '%I:%M %p')
+        else:
+            time_obj = datetime.strptime(time_str, '%H:%M')
+        return time_obj.hour, time_obj.minute
+
+    def wait_for_calendar_load(self):
+        self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".rbc-time-view")))
+        print("✓ Calendar loaded successfully")
+
+    def drag_to_create_event(self, day_index, start_hour, start_minute, end_hour, end_minute):
+        day_slots = self.driver.find_elements(By.CSS_SELECTOR, ".rbc-day-slot")
+        if day_index >= len(day_slots):
+            raise ValueError(f"Day index {day_index} out of range")
+
+        target_day = day_slots[day_index]
+        time_slots = target_day.find_elements(By.CSS_SELECTOR, ".rbc-time-slot")
+
+        start_slot_index = (start_hour - 6) * 2 + (1 if start_minute >= 30 else 0)
+        end_slot_index = (end_hour - 6) * 2 + (1 if end_minute >= 30 else 0)
+
+        if start_slot_index >= len(time_slots) or end_slot_index >= len(time_slots):
+            raise ValueError("Time slots out of range")
+
+        start_slot = time_slots[start_slot_index]
+        end_slot = time_slots[end_slot_index]
+
+        self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'instant', block: 'center'});", start_slot)
+        time.sleep(0.3)
+
+        actions = ActionChains(self.driver)
+        actions.click_and_hold(start_slot).move_to_element(end_slot).release().perform()
+        time.sleep(0.5)
+
+    def fill_event_form(self, title, description=''):
+        try:
+            time.sleep(0.5)  # brief pause to allow popup to render
+
+            title_selectors = [
+                "input[name='title']", "input[placeholder*='title' i]",
+                "input[type='text']", ".event-title-input", "input[id*='title' i]"
+            ]
+            for selector in title_selectors:
+                try:
+                    title_input = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    title_input.clear()
+                    title_input.send_keys(title)
+                    print(f"  ✓ Filled title: {title}")
+                    break
+                except:
+                    continue
+
+            if description:
+                desc_selectors = [
+                    "textarea[name='description']", "textarea[placeholder*='description' i]",
+                    "textarea", "input[name='description']"
+                ]
+                for selector in desc_selectors:
+                    try:
+                        desc_input = self.driver.find_element(By.CSS_SELECTOR, selector)
+                        desc_input.clear()
+                        desc_input.send_keys(description)
+                        print(f"  ✓ Filled description")
+                        break
+                    except:
+                        continue
+
+            try:
+                submit_btn = self.driver.find_element(
+                    By.XPATH,
+                    "//button[contains(text(), 'Save') or contains(text(), 'Create') or contains(text(), 'Submit')]"
+                )
+                submit_btn.click()
+                time.sleep(0.5)
+                print(f"  ✓ Form submitted")
+                return True
+            except:
+               # print("  ⚠ Could not find submit button, trying Enter key")
+                #ActionChains(self.driver).send_keys(Keys.RETURN).perform()
+                #time.sleep(0.5)
+                return True
+
+        except Exception as e:
+            print(f"  ⚠ Error filling event form: {e}")
+            return False
+
+    def fill_task_popup(self, task_name="Default Task", team_name="CAB"):
+        try:
+            print("📝 Waiting for task popup...")
+
+            task_input = self.wait.until(EC.presence_of_element_located((By.ID, "country-select-demo")))
+            task_input.click()
+            task_input.send_keys(task_name)
+            time.sleep(1)
+            task_input.send_keys(Keys.RETURN)
+            print(f"  ✓ Task '{task_name}' entered")
+
+            team_input = self.wait.until(EC.presence_of_element_located((By.ID, "combo-box-demot4")))
+            team_input.click()
+            team_input.send_keys(team_name)
+            time.sleep(1)
+            team_input.send_keys(Keys.DOWN)
+            team_input.send_keys(Keys.RETURN)
+            print(f"  ✓ Team '{team_name}' selected")
+
+            add_task_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//span[text()='Add Task']")))
+            add_task_btn.click()
+            print("  ✓ Add Task button clicked")
+
+            time.sleep(1)
+            return True
+
+        except Exception as e:
+            print(f"  ⚠ Error filling task popup: {e}")
+            return False
+
+    def create_event_from_data(self, event_data):
+        try:
+            if event_data['date']:
+                day_index = self.get_day_index_from_date(event_data['date'])
+                if day_index is None:
+                    print(f"  ⚠ Date {event_data['date']} not in current calendar view")
+                    return False
+            elif event_data['day']:
+                day_index = self.get_day_index_from_name(event_data['day'])
+                if day_index is None:
+                    print(f"  ⚠ Invalid day name: {event_data['day']}")
+                    return False
+            else:
+                print("  ⚠ No day or date specified")
+                return False
+
+            start_hour, start_minute = self.time_to_hour_minute(event_data['start_time'])
+            end_hour, end_minute = self.time_to_hour_minute(event_data['end_time'])
+
+            if start_hour < 6 or end_hour > 21:
+                print(f"  ⚠ Time out of calendar range (6 AM - 9 PM): {event_data['title']}")
+                return False
+
+            print(f"\n📅 Creating event: '{event_data['title']}'")
+            print(f"  Day index: {day_index}, Time: {start_hour}:{start_minute:02d} - {end_hour}:{end_minute:02d}")
+
+            self.drag_to_create_event(day_index, start_hour, start_minute, end_hour, end_minute)
+
+            success = self.fill_event_form(event_data['title'], event_data['description'])
+
+            if success:
+                self.fill_task_popup(event_data.get('task', 'Default Task'), event_data.get('team', 'CAB'))
+
+            return success
+
+        except Exception as e:
+            print(f"  ❌ Error creating event '{event_data['title']}': {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def populate_calendar_from_csv(self, csv_file_path):
+        print(f"\n{'=' * 60}")
+        print(f"📋 Reading events from: {csv_file_path}")
+        print(f"{'=' * 60}")
+
+        events = self.read_events_from_csv(csv_file_path)
+        print(f"✓ Found {len(events)} events to create\n")
+
+        success_count = 0
+        fail_count = 0
+
+        for i, event in enumerate(events, 1):
+            print(f"[{i}/{len(events)}] Processing: {event['title']}")
+            if self.create_event_from_data(event):
+                success_count += 1
+                print(f"  ✅ Success")
+            else:
+                fail_count += 1
+                print(f"  ❌ Failed")
+            time.sleep(1)
+
+        print(f"\n{'=' * 60}")
+        print(f"📊 SUMMARY")
+        print(f"{'=' * 60}")
+        print(f"✅ Successfully created: {success_count}")
+        print(f"❌ Failed: {fail_count}")
+        print(f"📝 Total: {len(events)}")
+        print(f"{'=' * 60}\n")
+
+
+# --- LOAD PASSWORD FROM .env ---
+load_dotenv("/Users/louis/Documents/Python/Desk Book/.venv/.gitignore")
+Password = os.getenv('PASSWORD')
+
+if Password:
+    print("✅ Password loaded successfully")
+else:
+    print("⚠️  Password not found or not loaded correctly.")
+
+# --- SET UP CHROME DRIVER ---
+service = Service('/Users/louis/Documents/Python/Timesheet/chromedriver')
+driver = webdriver.Chrome(service=service)
+driver.maximize_window()
+
+try:
+    print("\n🌐 Opening timesheet website...")
+    driver.get('https://bbparam.com/home/#Dashboard')
+
+    print("📧 Entering email...")
+    time.sleep(1)
+    email_input = driver.find_element(By.CSS_SELECTOR, '.form-control.ltr_override.input.ext-input.text-box.ext-text-box')
+    email_input.send_keys('john.selvaratnam@balfourbeatty.com' + Keys.RETURN)
+
+    print("🔐 Entering password...")
+    time.sleep(2)
+    password_input = driver.find_element(By.CSS_SELECTOR, '#i0118')
+    password_input.send_keys(Password + Keys.RETURN)
+
+    time.sleep(2)
+
+    print("❌ Clicking cancel button...")
+    cancel_button = driver.find_element(By.XPATH, "//button[normalize-space()='Cancel']")
+    cancel_button.click()
+
+    print("📆 Waiting for date selector button...")
+    time.sleep(3)
+    mycal_button = driver.find_element(By.XPATH, "//button[normalize-space()='MyCalendar']")
+    mycal_button.click()
+    print("✅ MyCalendar button clicked")
+
+    time.sleep(2)
+    workweek_to_week_button = driver.find_element(By.XPATH, "//button[normalize-space()='Week']")
+    workweek_to_week_button.click()
+    print("✅ Week button clicked")
+    time.sleep(2)
+
+    print("\n🤖 Initializing calendar automation...")
+    calendar = CalendarAutomation(driver)
+    calendar.wait_for_calendar_load()
+
+    csv_path = "/Users/louis/Documents/Python/Timesheet/meeting_template2.csv"
+    calendar.populate_calendar_from_csv(csv_path)
+
+    print("\n🎉 Calendar automation complete!")
+    print("⏳ Keeping browser open for 60 seconds to review...")
+
+    for remaining in tqdm(range(60), desc="Countdown", unit="sec"):
+        time.sleep(1)
+
+
+
+except Exception as e:
+    print(f"\n❌ ERROR: {e}")
+    import traceback
+    traceback.print_exc()
+    time.sleep(10)
+
+finally:
+    print("\n👋 Closing browser...")
+    driver.quit()
